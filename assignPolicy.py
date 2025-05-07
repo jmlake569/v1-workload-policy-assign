@@ -5,9 +5,11 @@ import argparse
 import os
 import logging
 import re
+import time
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 from logging.handlers import RotatingFileHandler
+from requests.exceptions import RequestException
 
 # Configure logging
 def setup_logging(dry_run: bool = False) -> None:
@@ -146,24 +148,69 @@ def validate_api_response(response: requests.Response, operation: str) -> None:
         logger.error(f"Request error during {operation}: {str(e)}")
         raise
 
-def get_policy_id(policy_name: str, api_key: str, dry_run: bool = False) -> Optional[str]:
+def make_api_request(url: str, headers: Dict[str, str], method: str = "GET", 
+                    data: Optional[Dict[str, Any]] = None, 
+                    max_retries: int = 3,
+                    initial_delay: int = 2) -> Dict[str, Any]:
     """
-    Get policy ID from policy name.
+    Make an API request with rate limiting and retry logic.
     
     Args:
-        policy_name: Name of the policy
-        api_key: API key
-        dry_run: Whether this is a dry run
-        
-    Returns:
-        Optional[str]: Policy ID if found, None otherwise
-        
-    Raises:
-        requests.exceptions.RequestException: If API request fails
-    """
-    if dry_run:
-        logger.info(f"[DRY RUN] Would search for policy with name: {policy_name}")
+        url: The API endpoint URL
+        headers: Request headers
+        method: HTTP method (GET, POST, etc.)
+        data: Request body data
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay between retries in seconds
     
+    Returns:
+        API response as dictionary
+    
+    Raises:
+        RequestException: If the request fails after all retries
+    """
+    retry_count = 0
+    delay = initial_delay
+    
+    while retry_count < max_retries:
+        try:
+            logging.debug(f"Making API request to {url}")
+            response = requests.request(method, url, headers=headers, json=data)
+            
+            # Check for rate limit
+            if response.status_code == 429:
+                retry_count += 1
+                if retry_count < max_retries:
+                    logging.warning(f"Rate limit hit. Waiting {delay} seconds before retry {retry_count}/{max_retries}")
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
+                    continue
+                else:
+                    raise RequestException(f"Rate limit exceeded after {max_retries} retries")
+            
+            # Check for other errors
+            response.raise_for_status()
+            
+            # Add a small delay between successful requests to avoid hitting rate limits
+            time.sleep(1)
+            
+            return response.json()
+            
+        except RequestException as e:
+            if retry_count < max_retries - 1:
+                retry_count += 1
+                logging.warning(f"Request failed: {str(e)}. Retrying in {delay} seconds...")
+                time.sleep(delay)
+                delay *= 2  # Exponential backoff
+            else:
+                raise
+
+def get_policy_id(policy_name: str, api_key: str, dry_run: bool = False) -> Optional[int]:
+    """Get policy ID from policy name."""
+    if dry_run:
+        logging.info(f"[DRY RUN] Would search for policy with name: {policy_name}")
+        return None
+        
     headers = {
         "api-version": API_VERSION,
         "api-secret-key": api_key,
@@ -171,47 +218,30 @@ def get_policy_id(policy_name: str, api_key: str, dry_run: bool = False) -> Opti
     }
     
     url = f"{BASE_URL}/policies"
-    params = {
-        "expand": "none"
-    }
+    params = {"expand": "none"}
     
     try:
-        logger.debug(f"Requesting policy list from {url}")
-        response = requests.get(url, headers=headers, params=params)
+        response = make_api_request(url, headers, params=params)
         validate_api_response(response, "policy lookup")
         
-        policies = response.json()
-        for policy in policies.get('policies', []):
-            if policy.get('name') == policy_name:
-                if dry_run:
-                    logger.info(f"[DRY RUN] Found policy ID: {policy.get('ID')}")
-                logger.debug(f"Found policy '{policy_name}' with ID: {policy.get('ID')}")
-                return policy.get('ID')
+        for policy in response.get("policies", []):
+            if policy["name"] == policy_name:
+                logging.debug(f"Found policy '{policy_name}' with ID: {policy['ID']}")
+                return policy["ID"]
         
-        logger.error(f"Policy '{policy_name}' not found")
-        return None
+        logging.error(f"Policy '{policy_name}' not found")
+        raise ValueError(f"Policy '{policy_name}' not found")
         
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error getting policy ID: {str(e)}")
+    except RequestException as e:
+        logging.error(f"Error getting policy ID: {str(e)}")
         raise
 
-def assign_policy_to_computer(computer_id: str, policy_id: str, api_key: str, dry_run: bool = False) -> bool:
-    """
-    Assign policy to a computer.
-    
-    Args:
-        computer_id: ID of the computer
-        policy_id: ID of the policy
-        api_key: API key
-        dry_run: Whether this is a dry run
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
+def assign_policy_to_computer(computer_id: int, policy_id: int, api_key: str, dry_run: bool = False) -> bool:
+    """Assign policy to computer."""
     if dry_run:
-        logger.info(f"[DRY RUN] Would assign policy ID {policy_id} to computer ID {computer_id}")
+        logging.info(f"[DRY RUN] Would assign policy ID {policy_id} to computer ID {computer_id}")
         return True
-    
+        
     headers = {
         "api-version": API_VERSION,
         "api-secret-key": api_key,
@@ -219,57 +249,40 @@ def assign_policy_to_computer(computer_id: str, policy_id: str, api_key: str, dr
     }
     
     url = f"{BASE_URL}/computers/{computer_id}"
-    data = {
-        "policyID": policy_id
-    }
+    data = {"policyID": policy_id}
     
     try:
-        logger.debug(f"Assigning policy {policy_id} to computer {computer_id}")
-        response = requests.post(url, headers=headers, json=data)
+        response = make_api_request(url, headers, method="POST", data=data)
         validate_api_response(response, "policy assignment")
         return True
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error assigning policy to computer {computer_id}: {str(e)}")
+        
+    except RequestException as e:
+        logging.error(f"Error assigning policy to computer {computer_id}: {str(e)}")
         return False
 
 def list_computers(api_key: str, dry_run: bool = False) -> Optional[Dict[str, Any]]:
-    """
-    Get list of computers.
-    
-    Args:
-        api_key: API key
-        dry_run: Whether this is a dry run
-        
-    Returns:
-        Optional[Dict[str, Any]]: Computer list if successful, None otherwise
-        
-    Raises:
-        requests.exceptions.RequestException: If API request fails
-    """
+    """Get list of computers."""
     if dry_run:
-        logger.info("[DRY RUN] Fetching list of computers...")
-    
+        logging.info("[DRY RUN] Would fetch list of computers")
+        return None
+        
     headers = {
         "api-version": API_VERSION,
         "api-secret-key": api_key,
         "Content-Type": "application/json"
     }
     
-    params = {
-        "expand": "none"
-    }
-    
     url = f"{BASE_URL}/computers"
+    params = {"expand": "none"}
     
     try:
-        logger.debug(f"Requesting computer list from {url}")
-        response = requests.get(url, headers=headers, params=params)
+        response = make_api_request(url, headers, params=params)
         validate_api_response(response, "computer listing")
-        computers = response.json()
-        logger.debug(f"Retrieved {len(computers.get('computers', []))} computers")
-        return computers
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error making request: {str(e)}")
+        logging.debug(f"Retrieved {len(response.get('computers', []))} computers")
+        return response
+        
+    except RequestException as e:
+        logging.error(f"Error listing computers: {str(e)}")
         raise
 
 def main():

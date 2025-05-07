@@ -28,90 +28,50 @@ param(
     [string]$ApiKey
 )
 
-# Function to set up logging
+# Function to initialize logging
 function Initialize-Logging {
     param(
         [bool]$DryRun
     )
     
     # Create logs directory if it doesn't exist
-    $logDir = "logs"
-    if (-not (Test-Path $logDir)) {
-        New-Item -ItemType Directory -Path $logDir | Out-Null
+    if (-not (Test-Path "logs")) {
+        New-Item -ItemType Directory -Path "logs" | Out-Null
     }
     
     # Generate log filename with timestamp
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $runType = if ($DryRun) { "dry_run" } else { "run" }
-    $logFile = Join-Path $logDir "policy_assignment_${runType}_${timestamp}.log"
+    $logFile = "logs/policy_assignment_${runType}_${timestamp}.log"
     
-    # Set up logging configuration
+    # Set up logging
     $script:LogFile = $logFile
-    
-    # Log initial information
-    Write-Log "Logging initialized. File: $logFile" -Level Info
-    if ($DryRun) {
-        Write-Log "Running in DRY RUN mode - no changes will be made" -Level Info
-        Write-Log "----------------------------------------" -Level Info
-    }
+    Write-Host "Logging to: $logFile"
 }
 
-# Function to write to both console and log file
+# Function to write log messages
 function Write-Log {
     param(
         [Parameter(Mandatory=$true)]
         [string]$Message,
         
         [Parameter(Mandatory=$false)]
-        [ValidateSet('Debug', 'Info', 'Warning', 'Error')]
-        [string]$Level = 'Info'
+        [ValidateSet("Debug", "Info", "Warning", "Error")]
+        [string]$Level = "Info"
     )
     
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logMessage = "$timestamp - $Level - $Message"
     
-    # Write to console with appropriate color
-    switch ($Level) {
-        'Debug'   { Write-Host $logMessage -ForegroundColor Gray }
-        'Info'    { Write-Host $logMessage -ForegroundColor White }
-        'Warning' { Write-Host $logMessage -ForegroundColor Yellow }
-        'Error'   { Write-Host $logMessage -ForegroundColor Red }
-    }
-    
     # Write to log file
     Add-Content -Path $script:LogFile -Value $logMessage
     
-    # Check log file size and rotate if necessary
-    $maxSize = 10MB
-    $maxBackups = 5
-    
-    if ((Get-Item $script:LogFile).Length -gt $maxSize) {
-        $logDir = Split-Path $script:LogFile
-        $logBase = [System.IO.Path]::GetFileNameWithoutExtension($script:LogFile)
-        $logExt = [System.IO.Path]::GetExtension($script:LogFile)
-        
-        # Remove oldest backup if it exists
-        $oldestBackup = Join-Path $logDir "${logBase}_backup${maxBackups}${logExt}"
-        if (Test-Path $oldestBackup) {
-            Remove-Item $oldestBackup -Force
-        }
-        
-        # Rotate existing backups
-        for ($i = $maxBackups - 1; $i -ge 1; $i--) {
-            $oldFile = Join-Path $logDir "${logBase}_backup${i}${logExt}"
-            $newFile = Join-Path $logDir "${logBase}_backup$($i + 1)${logExt}"
-            if (Test-Path $oldFile) {
-                Move-Item $oldFile $newFile -Force
-            }
-        }
-        
-        # Rename current log file
-        $backupFile = Join-Path $logDir "${logBase}_backup1${logExt}"
-        Move-Item $script:LogFile $backupFile -Force
-        
-        # Create new log file
-        New-Item -ItemType File -Path $script:LogFile | Out-Null
-        Write-Log "Log file rotated due to size limit" -Level Info
+    # Write to console with appropriate color
+    switch ($Level) {
+        "Debug"   { Write-Host $logMessage -ForegroundColor Gray }
+        "Info"    { Write-Host $logMessage }
+        "Warning" { Write-Host $logMessage -ForegroundColor Yellow }
+        "Error"   { Write-Host $logMessage -ForegroundColor Red }
     }
 }
 
@@ -121,7 +81,7 @@ function Write-ErrorWithExit {
         [string]$Message,
         [int]$ExitCode = 1
     )
-    Write-Log $Message -Level Error
+    Write-Log -Message $Message -Level Error
     exit $ExitCode
 }
 
@@ -137,20 +97,19 @@ function Test-Hostname {
     
     # Check if hostname is empty after trimming
     if ([string]::IsNullOrWhiteSpace($Hostname)) {
-        Write-Log "Empty hostname found" -Level Warning
         return $false
     }
     
     # Check if hostname is too long (RFC 1035 specifies 255 characters max)
     if ($Hostname.Length -gt 255) {
-        Write-Log "Hostname exceeds maximum length of 255 characters: $Hostname" -Level Warning
+        Write-Warning "Hostname exceeds maximum length of 255 characters: $Hostname"
         return $false
     }
     
     # Check for invalid characters
     $invalidChars = [regex]::Escape('!@#$%^&*()+=[]{}|;:"<>?/')
     if ($Hostname -match "[$invalidChars]") {
-        Write-Log "Hostname contains invalid characters: $Hostname" -Level Warning
+        Write-Warning "Hostname contains invalid characters: $Hostname"
         return $false
     }
     
@@ -165,11 +124,9 @@ $BASE_URL = "https://cloudone.trendmicro.com/api"
 function Get-ApiKey {
     try {
         if ($ApiKey) {
-            Write-Log "Using API key from command line arguments" -Level Debug
             return $ApiKey
         }
         elseif ($env:TREND_API_KEY) {
-            Write-Log "Using API key from environment variable" -Level Debug
             return $env:TREND_API_KEY
         }
         else {
@@ -192,16 +149,92 @@ function Test-ApiResponse {
     )
     
     if (-not $Response) {
-        Write-Log "No response received from API during $Operation" -Level Error
         Write-ErrorWithExit "No response received from API during $Operation"
     }
     
     if ($Response -is [System.Management.Automation.ErrorRecord]) {
-        Write-Log "API Error during $Operation`: $($Response.Exception.Message)" -Level Error
         Write-ErrorWithExit "API Error during $Operation`: $($Response.Exception.Message)"
     }
+}
+
+# Function to handle rate limiting
+function Start-SleepWithLog {
+    param(
+        [int]$Seconds,
+        [string]$Reason
+    )
+    Write-Log "Rate limit detected. Waiting $Seconds seconds before retrying... Reason: $Reason" -Level Warning
+    Start-Sleep -Seconds $Seconds
+}
+
+# Function to make API request with rate limiting
+function Invoke-ApiRequest {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Uri,
+        
+        [Parameter(Mandatory=$true)]
+        [hashtable]$Headers,
+        
+        [Parameter(Mandatory=$false)]
+        [string]$Method = "Get",
+        
+        [Parameter(Mandatory=$false)]
+        [object]$Body,
+        
+        [Parameter(Mandatory=$false)]
+        [int]$MaxRetries = 5,
+        
+        [Parameter(Mandatory=$false)]
+        [int]$InitialDelay = 5
+    )
     
-    Write-Log "API $Operation successful" -Level Debug
+    $retryCount = 0
+    $delay = $InitialDelay
+    
+    while ($retryCount -lt $MaxRetries) {
+        try {
+            $params = @{
+                Uri = $Uri
+                Headers = $Headers
+                Method = $Method
+                ErrorAction = "Stop"
+            }
+            
+            if ($Body) {
+                $params.Body = $Body
+            }
+            
+            Write-Log "Making API request to $Uri" -Level Debug
+            
+            # Add a longer delay between requests to prevent hitting rate limits
+            Start-Sleep -Seconds 2
+            
+            $response = Invoke-RestMethod @params
+            return $response
+        }
+        catch [System.Net.WebException] {
+            $statusCode = $_.Exception.Response.StatusCode.value__
+            
+            # Check for rate limit (429) or connection issues
+            if ($statusCode -eq 429 -or $_.Exception.Message -like "*connection was forcibly closed*") {
+                $retryCount++
+                if ($retryCount -lt $MaxRetries) {
+                    Write-Log "Rate limit or connection issue detected. Attempt $retryCount of $MaxRetries" -Level Warning
+                    # Use exponential backoff with a longer initial delay
+                    $delay = [math]::Pow(2, $retryCount) * $InitialDelay
+                    Start-SleepWithLog -Seconds $delay -Reason "Rate limit/Connection issue"
+                    continue
+                }
+            }
+            throw
+        }
+        catch {
+            throw
+        }
+    }
+    
+    throw "Maximum retry attempts reached"
 }
 
 # Function to get policy ID
@@ -229,7 +262,7 @@ function Get-PolicyId {
     
     try {
         Write-Log "Requesting policy list from $url" -Level Debug
-        $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop
+        $response = Invoke-ApiRequest -Uri $url -Headers $headers -Method Get
         Test-ApiResponse -Response $response -Operation "policy lookup"
         
         $policy = $response.policies | Where-Object { $_.name -eq $PolicyName } | Select-Object -First 1
@@ -282,7 +315,7 @@ function Set-ComputerPolicy {
     
     try {
         Write-Log "Assigning policy $PolicyId to computer $ComputerId" -Level Debug
-        $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Post -Body $body -ErrorAction Stop
+        $response = Invoke-ApiRequest -Uri $url -Headers $headers -Method Post -Body $body
         Test-ApiResponse -Response $response -Operation "policy assignment"
         return $true
     }
@@ -321,7 +354,7 @@ function Get-Computers {
     
     try {
         Write-Log "Requesting computer list from $url" -Level Debug
-        $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop
+        $response = Invoke-ApiRequest -Uri $url -Headers $headers -Method Get
         Test-ApiResponse -Response $response -Operation "computer listing"
         Write-Log "Retrieved $($response.computers.Count) computers" -Level Debug
         return $response
@@ -336,12 +369,95 @@ function Get-Computers {
     }
 }
 
+# Function to process computers in batches
+function Process-ComputerBatch {
+    param(
+        [Parameter(Mandatory=$true)]
+        [array]$Computers,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$PolicyId,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$ApiKey,
+        
+        [Parameter(Mandatory=$true)]
+        [bool]$DryRun,
+        
+        [Parameter(Mandatory=$false)]
+        [int]$BatchSize = 10
+    )
+    
+    $successCount = 0
+    $failCount = 0
+    $notFoundCount = 0
+    $invalidHostnameCount = 0
+    
+    # Process computers in batches
+    for ($i = 0; $i -lt $Computers.Count; $i += $BatchSize) {
+        $batch = $Computers | Select-Object -Skip $i -First $BatchSize
+        
+        Write-Log "Processing batch of $($batch.Count) computers (batch $([math]::Floor($i/$BatchSize) + 1) of $([math]::Ceiling($Computers.Count/$BatchSize)))" -Level Info
+        
+        foreach ($computer in $batch) {
+            $hostname = $computer.hostName.Trim()
+            
+            if (-not $hostname) {
+                Write-Log "Found computer without hostname, skipping..." -Level Warning
+                $failCount++
+                continue
+            }
+            
+            if (-not (Test-Hostname -Hostname $hostname)) {
+                Write-Log "Invalid hostname in CSV: $hostname" -Level Warning
+                $invalidHostnameCount++
+                $failCount++
+                continue
+            }
+            
+            if ($computerMap.ContainsKey($hostname)) {
+                if (Set-ComputerPolicy -ComputerId $computerMap[$hostname] -PolicyId $policyId -ApiKey $apiKey -DryRun $DryRun) {
+                    Write-Log "Successfully assigned policy to $hostname" -Level Info
+                    $successCount++
+                }
+                else {
+                    Write-Log "Failed to assign policy to $hostname" -Level Error
+                    $failCount++
+                }
+            }
+            else {
+                Write-Log "Computer $hostname not found in the system" -Level Warning
+                $notFoundCount++
+                $failCount++
+            }
+        }
+        
+        # Add a delay between batches to prevent rate limiting
+        if ($i + $BatchSize -lt $Computers.Count) {
+            Write-Log "Waiting 5 seconds before processing next batch..." -Level Info
+            Start-Sleep -Seconds 5
+        }
+    }
+    
+    return @{
+        SuccessCount = $successCount
+        FailCount = $failCount
+        NotFoundCount = $notFoundCount
+        InvalidHostnameCount = $invalidHostnameCount
+    }
+}
+
 # Main execution
 try {
     # Initialize logging
     Initialize-Logging -DryRun $DryRun
     
     $apiKey = Get-ApiKey
+
+    if ($DryRun) {
+        Write-Log "Running in DRY RUN mode - no changes will be made" -Level Info
+        Write-Log "----------------------------------------" -Level Info
+    }
 
     # Get policy ID
     $policyId = Get-PolicyId -PolicyName $Policy -ApiKey $apiKey -DryRun $DryRun
@@ -359,78 +475,37 @@ try {
     $computerMap = @{}
     foreach ($comp in $computers.computers) {
         if (-not $comp.hostName) {
-            Write-Log "Found computer without hostname, skipping..." -Level Warning
+            Write-Warning "Found computer without hostname, skipping..."
             continue
         }
         
         # Sanitize and validate hostname from API
         if (-not (Test-Hostname -Hostname $comp.hostName)) {
-            Write-Log "Found computer with invalid hostname, skipping..." -Level Warning
+            Write-Warning "Found computer with invalid hostname, skipping..."
             continue
         }
         
         $computerMap[$comp.hostName] = $comp.ID
     }
-    
-    Write-Log "Created mapping for $($computerMap.Count) valid computers" -Level Debug
 
-    # Read CSV and assign policy
-    $successCount = 0
-    $failCount = 0
-    $notFoundCount = 0
-    $invalidHostnameCount = 0
-
+    # Read CSV and process in batches
     try {
-        Write-Log "Reading CSV file: $CsvPath" -Level Debug
         $csvData = Import-Csv -Path $CsvPath -ErrorAction Stop
+        $results = Process-ComputerBatch -Computers $csvData -PolicyId $policyId -ApiKey $apiKey -DryRun $DryRun -BatchSize 10
     }
     catch {
-        Write-Log "Error reading CSV file: $_" -Level Error
         Write-ErrorWithExit "Error reading CSV file: $_"
     }
 
-    foreach ($row in $csvData) {
-        if (-not $row.hostName) {
-            Write-Log "Found row without hostname, skipping..." -Level Warning
-            $failCount++
-            continue
-        }
-
-        $hostname = $row.hostName.Trim()
-        
-        # Validate hostname from CSV
-        if (-not (Test-Hostname -Hostname $hostname)) {
-            Write-Log "Invalid hostname in CSV: $hostname" -Level Warning
-            $invalidHostnameCount++
-            $failCount++
-            continue
-        }
-
-        if ($computerMap.ContainsKey($hostname)) {
-            if (Set-ComputerPolicy -ComputerId $computerMap[$hostname] -PolicyId $policyId -ApiKey $apiKey -DryRun $DryRun) {
-                Write-Log "Successfully assigned policy to $hostname" -Level Info
-                $successCount++
-            }
-            else {
-                Write-Log "Failed to assign policy to $hostname" -Level Error
-                $failCount++
-            }
-        }
-        else {
-            Write-Log "Computer $hostname not found in the system" -Level Warning
-            $notFoundCount++
-            $failCount++
-        }
+    # Print summary
+    Write-Host "`nSummary:"
+    Write-Host "Successfully assigned policy to $($results.SuccessCount) computers"
+    Write-Host "Failed to assign policy to $($results.FailCount) computers"
+    if ($results.NotFoundCount -gt 0) {
+        Write-Host "Computers not found in system: $($results.NotFoundCount)"
     }
-
-    Write-Log "`nSummary:" -Level Info
-    Write-Log "Successfully assigned policy to $successCount computers" -Level Info
-    Write-Log "Failed to assign policy to $failCount computers" -Level Info
-    if ($notFoundCount -gt 0) {
-        Write-Log "Computers not found in system: $notFoundCount" -Level Info
-    }
-    if ($invalidHostnameCount -gt 0) {
-        Write-Log "Invalid hostnames in CSV: $invalidHostnameCount" -Level Info
+    if ($results.InvalidHostnameCount -gt 0) {
+        Write-Host "Invalid hostnames in CSV: $($results.InvalidHostnameCount)"
     }
 
     if ($DryRun) {
@@ -438,6 +513,5 @@ try {
     }
 }
 catch {
-    Write-Log "Unexpected error: $_" -Level Error
     Write-ErrorWithExit "Unexpected error: $_"
-} 
+}
