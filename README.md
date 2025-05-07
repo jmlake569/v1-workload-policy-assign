@@ -69,7 +69,7 @@ python assignPolicy.py --policy "Policy Name" --csv computers.csv
 
 #### Basic Usage
 ```powershell
-.\Assign-Policy.ps1 -Policy "Policy Name" -CsvPath computers.csv
+.\assignPolicy.ps1 -Policy "Policy Name" -CsvPath computers.csv
 ```
 
 #### Command Line Arguments
@@ -109,41 +109,76 @@ python assignPolicy.py --policy "Windows Server 2022" --csv computers.csv --api-
 1. Basic policy assignment (using environment variable for API key):
 ```powershell
 $env:TREND_API_KEY="your-api-key"
-.\Assign-Policy.ps1 -Policy "Windows Server 2022" -CsvPath computers.csv
+.\assignPolicy.ps1 -Policy "Windows Server 2022" -CsvPath computers.csv
 ```
 
 2. Dry run (no changes made):
 ```powershell
-.\Assign-Policy.ps1 -Policy "Windows Server 2022" -CsvPath computers.csv -ApiKey "your-api-key" -DryRun
+.\assignPolicy.ps1 -Policy "Windows Server 2022" -CsvPath computers.csv -ApiKey "your-api-key" -DryRun
 ```
 
-## Output
+## Logging
 
-Both scripts will:
-1. Save a list of computers to a JSON file with timestamp
-2. Process each hostname in the CSV file
-3. Display success/failure messages for each computer
-4. Show a summary of successful and failed assignments
+Both scripts implement comprehensive logging systems that write to both console and log files.
 
-Example output:
+### Log File Location
+- Logs are stored in a `logs` directory (created automatically)
+- Each run creates a new timestamped log file
+- Format: `policy_assignment_[run_type]_[timestamp].log`
+- Example: `policy_assignment_run_20240321_143022.log`
+
+### Log Rotation
+- Maximum file size: 10MB
+- Keeps 5 backup files
+- Automatic rotation when size limit is reached
+- Backup files are named with sequential numbers (e.g., `policy_assignment_run_20240321_143022_backup1.log`)
+
+### Log Levels
+- Debug: Detailed technical information (gray in console)
+- Info: General operational messages (white in console)
+- Warning: Potential issues (yellow in console)
+- Error: Critical problems (red in console)
+
+### Log Format
 ```
-Response saved to computers_list_20250506_123456.json
-Successfully assigned policy to computer1.example.com
-Successfully assigned policy to computer2.example.com
+yyyy-MM-dd HH:mm:ss - [Level] - [Message]
+```
 
-Summary:
-Successfully assigned policy to 2 computers
-Failed to assign policy to 0 computers
+Example log entries:
+```
+2024-03-21 14:30:22 - Info - Logging initialized. File: logs/policy_assignment_run_20240321_143022.log
+2024-03-21 14:30:23 - Debug - Requesting policy list from https://cloudone.trendmicro.com/api/policies
+2024-03-21 14:30:24 - Warning - Invalid hostname in CSV: server@123
+2024-03-21 14:30:25 - Error - Failed to assign policy to computer1.example.com
 ```
 
 ## Error Handling
 
-Both scripts handle various error conditions:
-- Invalid API key
-- Policy not found
-- Computer not found in system
-- CSV file format issues
-- API communication errors
+Both scripts implement robust error handling:
+
+### API Errors
+- Invalid API key detection
+- Network connectivity issues
+- API response validation
+- Rate limiting handling
+
+### Input Validation
+- CSV file format validation
+- Hostname validation (RFC 1035 standards)
+- Policy name validation
+- Required parameter checking
+
+### Runtime Errors
+- File system errors
+- Permission issues
+- Memory constraints
+- Unexpected API responses
+
+### Error Recovery
+- Graceful failure handling
+- Detailed error messages
+- Operation summary on completion
+- Dry run mode for safe testing
 
 ## Security Notes
 
@@ -151,3 +186,6 @@ Both scripts handle various error conditions:
 - Use environment variables or secure key management in production
 - Consider using the dry run option to verify changes before applying them
 - Always use secure methods to provide the API key (environment variable or command line)
+- Log files may contain sensitive information - ensure proper access controls
+- Regularly rotate and archive log files
+- Consider implementing log file encryption for sensitive environments
