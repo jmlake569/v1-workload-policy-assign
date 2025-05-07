@@ -1,19 +1,73 @@
 # PowerShell script to assign Trend Micro policies to computers
 # Usage: .\Assign-Policy.ps1 -Policy "Policy Name" -CsvPath "path\to\computers.csv" [-DryRun] [-ApiKey "your-api-key"]
 
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory=$true, Position=0, HelpMessage="Name of the policy to assign")]
+    [ValidateNotNullOrEmpty()]
     [string]$Policy,
     
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory=$true, Position=1, HelpMessage="Path to CSV file containing hostnames")]
+    [ValidateNotNullOrEmpty()]
+    [ValidateScript({
+        if (-not (Test-Path $_)) {
+            throw "CSV file not found at path: $_"
+        }
+        if (-not $_.EndsWith('.csv')) {
+            throw "File must be a CSV file"
+        }
+        return $true
+    })]
     [string]$CsvPath,
     
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory=$false, HelpMessage="Show what would be done without making changes")]
     [switch]$DryRun,
     
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory=$false, HelpMessage="Trend Micro API key (can also use TREND_API_KEY environment variable)")]
+    [ValidateNotNullOrEmpty()]
     [string]$ApiKey
 )
+
+# Error handling function
+function Write-ErrorWithExit {
+    param(
+        [string]$Message,
+        [int]$ExitCode = 1
+    )
+    Write-Error $Message
+    exit $ExitCode
+}
+
+# Function to sanitize hostname
+function Test-Hostname {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Hostname
+    )
+    
+    # Trim whitespace
+    $Hostname = $Hostname.Trim()
+    
+    # Check if hostname is empty after trimming
+    if ([string]::IsNullOrWhiteSpace($Hostname)) {
+        return $false
+    }
+    
+    # Check if hostname is too long (RFC 1035 specifies 255 characters max)
+    if ($Hostname.Length -gt 255) {
+        Write-Warning "Hostname exceeds maximum length of 255 characters: $Hostname"
+        return $false
+    }
+    
+    # Check for invalid characters
+    $invalidChars = [regex]::Escape('!@#$%^&*()+=[]{}|;:"<>?/')
+    if ($Hostname -match "[$invalidChars]") {
+        Write-Warning "Hostname contains invalid characters: $Hostname"
+        return $false
+    }
+    
+    return $true
+}
 
 # API Configuration
 $API_VERSION = "v1"
@@ -21,15 +75,38 @@ $BASE_URL = "https://cloudone.trendmicro.com/api"
 
 # Function to get API key
 function Get-ApiKey {
-    if ($ApiKey) {
-        return $ApiKey
+    try {
+        if ($ApiKey) {
+            return $ApiKey
+        }
+        elseif ($env:TREND_API_KEY) {
+            return $env:TREND_API_KEY
+        }
+        else {
+            Write-ErrorWithExit "API key not provided. Please provide it via -ApiKey parameter or TREND_API_KEY environment variable."
+        }
     }
-    elseif ($env:TREND_API_KEY) {
-        return $env:TREND_API_KEY
+    catch {
+        Write-ErrorWithExit "Error retrieving API key: $_"
     }
-    else {
-        Write-Error "API key not provided. Please provide it via -ApiKey parameter or TREND_API_KEY environment variable."
-        exit 1
+}
+
+# Function to validate API response
+function Test-ApiResponse {
+    param(
+        [Parameter(Mandatory=$true)]
+        [object]$Response,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$Operation
+    )
+    
+    if (-not $Response) {
+        Write-ErrorWithExit "No response received from API during $Operation"
+    }
+    
+    if ($Response -is [System.Management.Automation.ErrorRecord]) {
+        Write-ErrorWithExit "API Error during $Operation`: $($Response.Exception.Message)"
     }
 }
 
@@ -57,7 +134,9 @@ function Get-PolicyId {
     }
     
     try {
-        $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
+        $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop
+        Test-ApiResponse -Response $response -Operation "policy lookup"
+        
         $policy = $response.policies | Where-Object { $_.name -eq $PolicyName } | Select-Object -First 1
         
         if ($policy) {
@@ -67,12 +146,13 @@ function Get-PolicyId {
             return $policy.ID
         }
         
-        Write-Host "Policy '$PolicyName' not found"
-        return $null
+        Write-ErrorWithExit "Policy '$PolicyName' not found"
+    }
+    catch [System.Net.WebException] {
+        Write-ErrorWithExit "Network error during policy lookup: $($_.Exception.Message)"
     }
     catch {
-        Write-Error "Error getting policy ID: $_"
-        return $null
+        Write-ErrorWithExit "Error getting policy ID: $_"
     }
 }
 
@@ -102,11 +182,16 @@ function Set-ComputerPolicy {
     } | ConvertTo-Json
     
     try {
-        $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Post -Body $body
+        $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Post -Body $body -ErrorAction Stop
+        Test-ApiResponse -Response $response -Operation "policy assignment"
         return $true
     }
+    catch [System.Net.WebException] {
+        Write-Error "Network error assigning policy to computer $ComputerId`: $($_.Exception.Message)"
+        return $false
+    }
     catch {
-        Write-Error "Error assigning policy to computer $ComputerId : $_"
+        Write-Error "Error assigning policy to computer $ComputerId`: $_"
         return $false
     }
 }
@@ -135,77 +220,117 @@ function Get-Computers {
     $url = "$BASE_URL/computers"
     
     try {
-        $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
-        
-        # Generate filename with timestamp
-        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-        $filename = "computers_list_$timestamp.json"
-        
-        # Save to file
-        $response | ConvertTo-Json -Depth 10 | Out-File $filename
-        
-        Write-Host "Response saved to $filename"
+        $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -ErrorAction Stop
+        Test-ApiResponse -Response $response -Operation "computer listing"
         return $response
     }
+    catch [System.Net.WebException] {
+        Write-ErrorWithExit "Network error fetching computer list: $($_.Exception.Message)"
+    }
     catch {
-        Write-Error "Error making request: $_"
-        return $null
+        Write-ErrorWithExit "Error making request: $_"
     }
 }
 
 # Main execution
-$apiKey = Get-ApiKey
+try {
+    $apiKey = Get-ApiKey
 
-if ($DryRun) {
-    Write-Host "Running in DRY RUN mode - no changes will be made"
-    Write-Host "----------------------------------------"
-}
+    if ($DryRun) {
+        Write-Host "Running in DRY RUN mode - no changes will be made"
+        Write-Host "----------------------------------------"
+    }
 
-# Get policy ID
-$policyId = Get-PolicyId -PolicyName $Policy -ApiKey $apiKey -DryRun $DryRun
-if (-not $policyId) {
-    exit 1
-}
+    # Get policy ID
+    $policyId = Get-PolicyId -PolicyName $Policy -ApiKey $apiKey -DryRun $DryRun
+    if (-not $policyId) {
+        Write-ErrorWithExit "Failed to get policy ID"
+    }
 
-# Get list of computers
-$computers = Get-Computers -ApiKey $apiKey -DryRun $DryRun
-if (-not $computers) {
-    exit 1
-}
+    # Get list of computers
+    $computers = Get-Computers -ApiKey $apiKey -DryRun $DryRun
+    if (-not $computers) {
+        Write-ErrorWithExit "Failed to get computer list"
+    }
 
-# Create a mapping of hostname to computer ID
-$computerMap = @{}
-foreach ($comp in $computers.computers) {
-    $computerMap[$comp.hostName] = $comp.ID
-}
+    # Create a mapping of hostname to computer ID
+    $computerMap = @{}
+    foreach ($comp in $computers.computers) {
+        if (-not $comp.hostName) {
+            Write-Warning "Found computer without hostname, skipping..."
+            continue
+        }
+        
+        # Sanitize and validate hostname from API
+        if (-not (Test-Hostname -Hostname $comp.hostName)) {
+            Write-Warning "Found computer with invalid hostname, skipping..."
+            continue
+        }
+        
+        $computerMap[$comp.hostName] = $comp.ID
+    }
 
-# Read CSV and assign policy
-$successCount = 0
-$failCount = 0
+    # Read CSV and assign policy
+    $successCount = 0
+    $failCount = 0
+    $notFoundCount = 0
+    $invalidHostnameCount = 0
 
-$csvData = Import-Csv -Path $CsvPath
-foreach ($row in $csvData) {
-    $hostname = $row.hostName
-    if ($computerMap.ContainsKey($hostname)) {
-        if (Set-ComputerPolicy -ComputerId $computerMap[$hostname] -PolicyId $policyId -ApiKey $apiKey -DryRun $DryRun) {
-            Write-Host "Successfully assigned policy to $hostname"
-            $successCount++
+    try {
+        $csvData = Import-Csv -Path $CsvPath -ErrorAction Stop
+    }
+    catch {
+        Write-ErrorWithExit "Error reading CSV file: $_"
+    }
+
+    foreach ($row in $csvData) {
+        if (-not $row.hostName) {
+            Write-Warning "Found row without hostname, skipping..."
+            $failCount++
+            continue
+        }
+
+        $hostname = $row.hostName.Trim()
+        
+        # Validate hostname from CSV
+        if (-not (Test-Hostname -Hostname $hostname)) {
+            Write-Warning "Invalid hostname in CSV: $hostname"
+            $invalidHostnameCount++
+            $failCount++
+            continue
+        }
+
+        if ($computerMap.ContainsKey($hostname)) {
+            if (Set-ComputerPolicy -ComputerId $computerMap[$hostname] -PolicyId $policyId -ApiKey $apiKey -DryRun $DryRun) {
+                Write-Host "Successfully assigned policy to $hostname"
+                $successCount++
+            }
+            else {
+                Write-Host "Failed to assign policy to $hostname"
+                $failCount++
+            }
         }
         else {
-            Write-Host "Failed to assign policy to $hostname"
+            Write-Host "Computer $hostname not found in the system"
+            $notFoundCount++
             $failCount++
         }
     }
-    else {
-        Write-Host "Computer $hostname not found in the system"
-        $failCount++
+
+    Write-Host "`nSummary:"
+    Write-Host "Successfully assigned policy to $successCount computers"
+    Write-Host "Failed to assign policy to $failCount computers"
+    if ($notFoundCount -gt 0) {
+        Write-Host "Computers not found in system: $notFoundCount"
+    }
+    if ($invalidHostnameCount -gt 0) {
+        Write-Host "Invalid hostnames in CSV: $invalidHostnameCount"
+    }
+
+    if ($DryRun) {
+        Write-Host "`nThis was a DRY RUN - no actual changes were made"
     }
 }
-
-Write-Host "`nSummary:"
-Write-Host "Successfully assigned policy to $successCount computers"
-Write-Host "Failed to assign policy to $failCount computers"
-
-if ($DryRun) {
-    Write-Host "`nThis was a DRY RUN - no actual changes were made"
+catch {
+    Write-ErrorWithExit "Unexpected error: $_"
 } 
