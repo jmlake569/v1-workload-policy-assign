@@ -1,0 +1,21 @@
+2025-05-08 10:12:36 - Info - Running in DRY RUN mode - no changes will be made
+2025-05-08 10:12:36 - Info - ----------------------------------------
+2025-05-08 10:12:36 - Info - [DRY RUN] Would search for policy with name: Boring Default Policy
+2025-05-08 10:12:36 - Debug - Requesting policy list from https://cloudone.trendmicro.com/api/policies
+2025-05-08 10:12:36 - Debug - Making API request to https://cloudone.trendmicro.com/api/policies
+2025-05-08 10:12:38 - Info - [DRY RUN] Found policy ID: 298
+2025-05-08 10:12:38 - Debug - Found policy 'Boring Default Policy' with ID: 298
+2025-05-08 10:12:38 - Info - Found 1 computers in CSV file
+2025-05-08 10:12:38 - Info - Processing batch of 1 computers (batch 1 of 1)
+2025-05-08 10:12:38 - Info - Processing computer 1 of 1: ec2-3-131-115-236.us-east-2.compute.amazonaws.com
+2025-05-08 10:12:38 - Debug - Searching for computer with hostname: ec2-3-131-115-236.us-east-2.compute.amazonaws.com
+2025-05-08 10:12:38 - Debug - Making API request to https://cloudone.trendmicro.com/api/computers/search
+2025-05-08 10:12:41 - Info - Found computer with hostname: ec2-3-131-115-236.us-east-2.compute.amazonaws.com
+2025-05-08 10:12:41 - Info -   - ID: 1853, Hostname: ec2-3-131-115-236.us-east-2.compute.amazonaws.com, PolicyID: 
+2025-05-08 10:12:41 - Info - [DRY RUN] Would assign policy ID 298 to computer ID 1853
+2025-05-08 10:12:41 - Info - 
+Summary:
+2025-05-08 10:12:41 - Info - Successfully assigned policy to 1 computers
+2025-05-08 10:12:41 - Info - Failed to assign policy to 0 computers
+2025-05-08 10:12:41 - Info - 
+This was a DRY RUN - no actual changes were made

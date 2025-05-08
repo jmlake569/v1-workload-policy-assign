@@ -307,31 +307,31 @@ function Get-ComputerByHostname {
         "Content-Type" = "application/json"
     }
     
-    # Use computers endpoint instead of search
-    $url = "$BASE_URL/computers?expand=none"
+    # Use search endpoint with specific criteria
+    $url = "$BASE_URL/computers/search"
+    
+    $searchCriteria = @{
+        "fieldName" = "hostName"
+        "stringTest" = "equal"
+        "stringValue" = $Hostname
+        "stringWildcards" = $false
+    }
+    
+    $body = @{
+        "searchCriteria" = @($searchCriteria)
+        "maxItems" = 100
+    } | ConvertTo-Json
     
     try {
         Write-Log ("Searching for computer with hostname: {0}" -f $Hostname) -Level Debug
         
-        $response = Invoke-ApiRequest -Uri $url -Headers $headers -Method Get
+        $response = Invoke-ApiRequest -Uri $url -Headers $headers -Method Post -Body $body
         
         if ($response.computers -and $response.computers.Count -gt 0) {
-            # Find computer by hostname in the response
-            $matchingComputer = $response.computers | Where-Object { $_.hostName -eq $Hostname } | Select-Object -First 1
-            
-            if ($matchingComputer) {
-                Write-Log ("Found computer with hostname: {0}" -f $Hostname) -Level Info
-                Write-Log ("  - ID: {0}, Hostname: {1}, PolicyID: {2}" -f $matchingComputer.ID, $matchingComputer.hostName, $matchingComputer.policyID) -Level Info
-                return $matchingComputer
-            }
-            else {
-                # Try case-insensitive match
-                $matchingComputer = $response.computers | Where-Object { $_.hostName -ieq $Hostname } | Select-Object -First 1
-                if ($matchingComputer) {
-                    Write-Log ("Found case-insensitive match: {0}" -f $matchingComputer.hostName) -Level Info
-                    return $matchingComputer
-                }
-            }
+            $matchingComputer = $response.computers | Select-Object -First 1
+            Write-Log ("Found computer with hostname: {0}" -f $Hostname) -Level Info
+            Write-Log ("  - ID: {0}, Hostname: {1}, PolicyID: {2}" -f $matchingComputer.ID, $matchingComputer.hostName, $matchingComputer.policyID) -Level Info
+            return $matchingComputer
         }
         
         Write-Log ("Computer not found with hostname: {0}" -f $Hostname) -Level Warning
