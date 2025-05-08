@@ -288,6 +288,61 @@ function Get-PolicyId {
     }
 }
 
+# Function to get a specific computer by hostname
+function Get-ComputerByHostname {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Hostname,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$ApiKey,
+        
+        [Parameter(Mandatory=$false)]
+        [bool]$DryRun = $false
+    )
+    
+    $headers = @{
+        "api-version" = $API_VERSION
+        "api-secret-key" = $ApiKey
+        "Content-Type" = "application/json"
+    }
+    
+    # Use computers endpoint instead of search
+    $url = "$BASE_URL/computers?expand=none"
+    
+    try {
+        Write-Log ("Searching for computer with hostname: {0}" -f $Hostname) -Level Debug
+        
+        $response = Invoke-ApiRequest -Uri $url -Headers $headers -Method Get
+        
+        if ($response.computers -and $response.computers.Count -gt 0) {
+            # Find computer by hostname in the response
+            $matchingComputer = $response.computers | Where-Object { $_.hostName -eq $Hostname } | Select-Object -First 1
+            
+            if ($matchingComputer) {
+                Write-Log ("Found computer with hostname: {0}" -f $Hostname) -Level Info
+                Write-Log ("  - ID: {0}, Hostname: {1}, PolicyID: {2}" -f $matchingComputer.ID, $matchingComputer.hostName, $matchingComputer.policyID) -Level Info
+                return $matchingComputer
+            }
+            else {
+                # Try case-insensitive match
+                $matchingComputer = $response.computers | Where-Object { $_.hostName -ieq $Hostname } | Select-Object -First 1
+                if ($matchingComputer) {
+                    Write-Log ("Found case-insensitive match: {0}" -f $matchingComputer.hostName) -Level Info
+                    return $matchingComputer
+                }
+            }
+        }
+        
+        Write-Log ("Computer not found with hostname: {0}" -f $Hostname) -Level Warning
+        return $null
+    }
+    catch {
+        Write-Log ("Error searching for computer: {0}" -f $_) -Level Error
+        return $null
+    }
+}
+
 # Function to assign policy to computer
 function Set-ComputerPolicy {
     param(
@@ -298,7 +353,7 @@ function Set-ComputerPolicy {
     )
     
     if ($DryRun) {
-        Write-Log "[DRY RUN] Would assign policy ID $PolicyId to computer ID $ComputerId" -Level Info
+        Write-Log ("[DRY RUN] Would assign policy ID {0} to computer ID {1}" -f $PolicyId, $ComputerId) -Level Info
         return $true
     }
     
@@ -314,58 +369,18 @@ function Set-ComputerPolicy {
     } | ConvertTo-Json
     
     try {
-        Write-Log "Assigning policy $PolicyId to computer $ComputerId" -Level Debug
+        Write-Log ("Assigning policy {0} to computer {1}" -f $PolicyId, $ComputerId) -Level Debug
         $response = Invoke-ApiRequest -Uri $url -Headers $headers -Method Post -Body $body
         Test-ApiResponse -Response $response -Operation "policy assignment"
         return $true
     }
     catch [System.Net.WebException] {
-        Write-Log "Network error assigning policy to computer $ComputerId`: $($_.Exception.Message)" -Level Error
+        Write-Log ("Network error assigning policy to computer {0}: {1}" -f $ComputerId, $_.Exception.Message) -Level Error
         return $false
     }
     catch {
-        Write-Log "Error assigning policy to computer $ComputerId`: $_" -Level Error
+        Write-Log ("Error assigning policy to computer {0}: {1}" -f $ComputerId, $_) -Level Error
         return $false
-    }
-}
-
-# Function to list computers
-function Get-Computers {
-    param(
-        [string]$ApiKey,
-        [bool]$DryRun
-    )
-    
-    if ($DryRun) {
-        Write-Log "[DRY RUN] Fetching list of computers..." -Level Info
-    }
-    
-    $headers = @{
-        "api-version" = $API_VERSION
-        "api-secret-key" = $ApiKey
-        "Content-Type" = "application/json"
-    }
-    
-    $params = @{
-        "expand" = "none"
-    }
-    
-    $url = "$BASE_URL/computers"
-    
-    try {
-        Write-Log "Requesting computer list from $url" -Level Debug
-        $response = Invoke-ApiRequest -Uri $url -Headers $headers -Method Get
-        Test-ApiResponse -Response $response -Operation "computer listing"
-        Write-Log "Retrieved $($response.computers.Count) computers" -Level Debug
-        return $response
-    }
-    catch [System.Net.WebException] {
-        Write-Log "Network error fetching computer list: $($_.Exception.Message)" -Level Error
-        Write-ErrorWithExit "Network error fetching computer list: $($_.Exception.Message)"
-    }
-    catch {
-        Write-Log "Error making request: $_" -Level Error
-        Write-ErrorWithExit "Error making request: $_"
     }
 }
 
@@ -373,7 +388,7 @@ function Get-Computers {
 function Process-ComputerBatch {
     param(
         [Parameter(Mandatory=$true)]
-        [array]$Computers,
+        [string]$CsvPath,
         
         [Parameter(Mandatory=$true)]
         [string]$PolicyId,
@@ -385,65 +400,132 @@ function Process-ComputerBatch {
         [bool]$DryRun,
         
         [Parameter(Mandatory=$false)]
-        [int]$BatchSize = 10
+        [int]$BatchSize = 100  # Increased batch size for efficiency
     )
     
-    $successCount = 0
-    $failCount = 0
-    $notFoundCount = 0
-    $invalidHostnameCount = 0
+    $script:successCount = 0
+    $script:failCount = 0
+    $script:notFoundCount = 0
+    $script:invalidHostnameCount = 0
+    $currentComputer = 0
     
-    # Process computers in batches
-    for ($i = 0; $i -lt $Computers.Count; $i += $BatchSize) {
-        $batch = $Computers | Select-Object -Skip $i -First $BatchSize
-        
-        Write-Log "Processing batch of $($batch.Count) computers (batch $([math]::Floor($i/$BatchSize) + 1) of $([math]::Ceiling($Computers.Count/$BatchSize)))" -Level Info
-        
-        foreach ($computer in $batch) {
-            $hostname = $computer.hostName.Trim()
-            
-            if (-not $hostname) {
-                Write-Log "Found computer without hostname, skipping..." -Level Warning
-                $failCount++
-                continue
-            }
-            
-            if (-not (Test-Hostname -Hostname $hostname)) {
-                Write-Log "Invalid hostname in CSV: $hostname" -Level Warning
-                $invalidHostnameCount++
-                $failCount++
-                continue
-            }
-            
-            if ($computerMap.ContainsKey($hostname)) {
-                if (Set-ComputerPolicy -ComputerId $computerMap[$hostname] -PolicyId $policyId -ApiKey $apiKey -DryRun $DryRun) {
-                    Write-Log "Successfully assigned policy to $hostname" -Level Info
-                    $successCount++
-                }
-                else {
-                    Write-Log "Failed to assign policy to $hostname" -Level Error
-                    $failCount++
-                }
-            }
-            else {
-                Write-Log "Computer $hostname not found in the system" -Level Warning
-                $notFoundCount++
-                $failCount++
-            }
+    # Get total number of lines in CSV (excluding header)
+    $totalLines = (Get-Content $CsvPath).Count - 1
+    Write-Log ("Found {0} computers in CSV file" -f $totalLines) -Level Info
+    
+    # Process CSV in batches using Get-Content for streaming
+    $batch = @()
+    $header = $null
+    
+    Get-Content $CsvPath | ForEach-Object {
+        if (-not $header) {
+            $header = $_
+            return
         }
         
-        # Add a delay between batches to prevent rate limiting
-        if ($i + $BatchSize -lt $Computers.Count) {
-            Write-Log "Waiting 5 seconds before processing next batch..." -Level Info
-            Start-Sleep -Seconds 5
+        $batch += [PSCustomObject]@{
+            hostName = $_.Split(',')[0].Trim('"')  # Assuming hostname is first column
+        }
+        
+        if ($batch.Count -eq $BatchSize) {
+            Process-Batch -Batch $batch -PolicyId $PolicyId -ApiKey $ApiKey -DryRun $DryRun -CurrentComputer $currentComputer -TotalLines $totalLines
+            $currentComputer += $batch.Count
+            $batch = @()
+            
+            # Add a delay between batches to prevent rate limiting
+            if ($currentComputer -lt $totalLines) {
+                Write-Log "Waiting 5 seconds before processing next batch..." -Level Info
+                Start-Sleep -Seconds 5
+            }
         }
     }
     
+    # Process any remaining computers
+    if ($batch.Count -gt 0) {
+        Process-Batch -Batch $batch -PolicyId $PolicyId -ApiKey $ApiKey -DryRun $DryRun -CurrentComputer $currentComputer -TotalLines $totalLines
+    }
+    
     return @{
-        SuccessCount = $successCount
-        FailCount = $failCount
-        NotFoundCount = $notFoundCount
-        InvalidHostnameCount = $invalidHostnameCount
+        SuccessCount = $script:successCount
+        FailCount = $script:failCount
+        NotFoundCount = $script:notFoundCount
+        InvalidHostnameCount = $script:invalidHostnameCount
+    }
+}
+
+# Function to process a single batch
+function Process-Batch {
+    param(
+        [Parameter(Mandatory=$true)]
+        [array]$Batch,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$PolicyId,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$ApiKey,
+        
+        [Parameter(Mandatory=$true)]
+        [bool]$DryRun,
+        
+        [Parameter(Mandatory=$true)]
+        [int]$CurrentComputer,
+        
+        [Parameter(Mandatory=$true)]
+        [int]$TotalLines
+    )
+    
+    $batchNumber = [math]::Floor($CurrentComputer/$Batch.Count) + 1
+    $totalBatches = [math]::Ceiling($TotalLines/$Batch.Count)
+    Write-Log ("Processing batch of {0} computers (batch {1} of {2})" -f $Batch.Count, $batchNumber, $totalBatches) -Level Info
+    
+    foreach ($computer in $Batch) {
+        $currentComputer++
+        $hostname = $computer.hostName.Trim()
+        
+        Write-Log ("Processing computer {0} of {1}: {2}" -f $currentComputer, $TotalLines, $hostname) -Level Info
+        
+        if (-not $hostname) {
+            Write-Log "Found computer without hostname, skipping..." -Level Warning
+            $script:failCount++
+            continue
+        }
+        
+        if (-not (Test-Hostname -Hostname $hostname)) {
+            Write-Log ("Invalid hostname in CSV: {0}" -f $hostname) -Level Warning
+            $script:invalidHostnameCount++
+            $script:failCount++
+            continue
+        }
+        
+        # Search for specific computer
+        $computerInfo = Get-ComputerByHostname -Hostname $hostname -ApiKey $apiKey -DryRun $DryRun
+        
+        if ($computerInfo) {
+            if ($DryRun) {
+                Write-Log ("[DRY RUN] Would assign policy ID {0} to computer ID {1}" -f $PolicyId, $computerInfo.ID) -Level Info
+                $script:successCount++
+            }
+            else {
+                if (Set-ComputerPolicy -ComputerId $computerInfo.ID -PolicyId $policyId -ApiKey $apiKey -DryRun $DryRun) {
+                    Write-Log ("Successfully assigned policy to {0}" -f $hostname) -Level Info
+                    $script:successCount++
+                }
+                else {
+                    Write-Log ("Failed to assign policy to {0}" -f $hostname) -Level Error
+                    $script:failCount++
+                }
+            }
+        }
+        else {
+            $script:notFoundCount++
+            $script:failCount++
+        }
+        
+        # Add a small delay between individual computers to prevent rate limiting
+        if ($currentComputer -lt $TotalLines) {
+            Start-Sleep -Seconds 1
+        }
     }
 }
 
@@ -465,47 +547,23 @@ try {
         Write-ErrorWithExit "Failed to get policy ID"
     }
 
-    # Get list of computers
-    $computers = Get-Computers -ApiKey $apiKey -DryRun $DryRun
-    if (-not $computers) {
-        Write-ErrorWithExit "Failed to get computer list"
-    }
-
-    # Create a mapping of hostname to computer ID
-    $computerMap = @{}
-    foreach ($comp in $computers.computers) {
-        if (-not $comp.hostName) {
-            Write-Warning "Found computer without hostname, skipping..."
-            continue
-        }
-        
-        # Sanitize and validate hostname from API
-        if (-not (Test-Hostname -Hostname $comp.hostName)) {
-            Write-Warning "Found computer with invalid hostname, skipping..."
-            continue
-        }
-        
-        $computerMap[$comp.hostName] = $comp.ID
-    }
-
-    # Read CSV and process in batches
+    # Process CSV in batches
     try {
-        $csvData = Import-Csv -Path $CsvPath -ErrorAction Stop
-        $results = Process-ComputerBatch -Computers $csvData -PolicyId $policyId -ApiKey $apiKey -DryRun $DryRun -BatchSize 10
+        $results = Process-ComputerBatch -CsvPath $CsvPath -PolicyId $policyId -ApiKey $apiKey -DryRun $DryRun -BatchSize 100
     }
     catch {
-        Write-ErrorWithExit "Error reading CSV file: $_"
+        Write-ErrorWithExit "Error processing CSV file: $_"
     }
 
     # Print summary
-    Write-Host "`nSummary:"
-    Write-Host "Successfully assigned policy to $($results.SuccessCount) computers"
-    Write-Host "Failed to assign policy to $($results.FailCount) computers"
+    Write-Log "`nSummary:" -Level Info
+    Write-Log ("Successfully assigned policy to {0} computers" -f $results.SuccessCount) -Level Info
+    Write-Log ("Failed to assign policy to {0} computers" -f $results.FailCount) -Level Info
     if ($results.NotFoundCount -gt 0) {
-        Write-Host "Computers not found in system: $($results.NotFoundCount)"
+        Write-Log ("Computers not found in system: {0}" -f $results.NotFoundCount) -Level Info
     }
     if ($results.InvalidHostnameCount -gt 0) {
-        Write-Host "Invalid hostnames in CSV: $($results.InvalidHostnameCount)"
+        Write-Log ("Invalid hostnames in CSV: {0}" -f $results.InvalidHostnameCount) -Level Info
     }
 
     if ($DryRun) {
